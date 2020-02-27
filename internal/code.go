@@ -8,3 +8,10 @@ const (
 	CodeTypeUnauthorized  uint32 = 3
 	CodeTypeUnknownError  uint32 = 4
 )
+
+// request struct types
+const (
+	TypeTransaction       string = "Transaction"
+	TypeValidatorUpdating string = "ValidatorUpdate"
+	TypeQueryByUserName   string = "QueryUser"
+)

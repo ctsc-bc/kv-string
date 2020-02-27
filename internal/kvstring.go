@@ -2,11 +2,12 @@ package kvstring
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/tendermint/tendermint/abci/types"
@@ -29,6 +30,26 @@ type State struct {
 	Size    int64  `json:"size"`
 	Height  int64  `json:"height"`
 	AppHash []byte `json:"app_hash"`
+}
+
+type ValidatorUpdateDate struct {
+	PubKey string `json:"pubkey"`
+	Power  int64  `json:"power"`
+}
+
+type RequestData struct {
+	Type      string              `json:"type"`
+	User      string              `json:"user"`
+	Location  []string            `json:"location"`
+	Date      string              `json:"date"`
+	FileHash  string              `json:"fileHash"`
+	Validator ValidatorUpdateDate `json:"validator"`
+	Hash      string
+}
+
+type UserTransIndex struct {
+	TransactionRecords []string `json:"transactions"`
+	NextKey            string   `json:"nextKey"`
 }
 
 func loadState(db dbm.DB) State {
@@ -108,48 +129,157 @@ func isValidatorTx(tx []byte) bool {
 	return strings.HasPrefix(string(tx), ValidatorSetChangePrefix)
 }
 
-func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.ResponseDeliverTx {
-	if isValidatorTx(req.Tx) {
-		// update validators in the merkle tree
-		// and in app.ValUpdates
-		return app.execValidatorTx(req.Tx)
+func (app *KVStringApplication) execTransaction(req RequestData) types.ResponseDeliverTx {
+	fmt.Println("hello,execTransaction")
+	value, _ := json.Marshal(req)
+	if req.User == "" || len(req.Location) != 2 || req.FileHash == "" || req.Date == "" {
+		fmt.Printf("execTransaction: bad request %s \n", string(value))
+		events := []types.Event{
+			{
+				Type: "app",
+				Attributes: []kv.Pair{
+					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
+					{Key: []byte("key"), Value: value},
+				},
+			},
+		}
+
+		return types.ResponseDeliverTx{Code: CodeTypeUnknownError, Events: events}
 	}
 
-	// parts := decodeValue(req.Tx)
-	// if parts != nil {
-	// 	if transaction(*app, parts) {
-	// 		events := []types.Event{
-	// 			{
-	// 				Type: "app",
-	// 				Attributes: []kv.Pair{
-	// 					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-	// 					{Key: []byte("key"), Value: parts[0]},
-	// 				},
-	// 			},
-	// 		}
+	// get current user index
+	var currentIndex UserTransIndex
+	userIndex, err := app.state.db.Get([]byte(req.User))
 
-	// 		return types.ResponseDeliverTx{Code: CodeTypeOK, Events: events}
-	// 	}
-	// }
+	if err != nil || userIndex == nil {
+		// update current index
+		currentIndex.TransactionRecords = append(currentIndex.TransactionRecords, string(req.Hash))
+
+		valueBytes, err := json.Marshal(currentIndex)
+		if err != nil {
+			fmt.Printf("execTransaction 2 %v \n", err)
+		}
+
+		err = app.state.db.Set([]byte(req.User), valueBytes)
+		if err != nil {
+			fmt.Printf("execTransaction 3 %v \n", err)
+		}
+
+	} else {
+		err := json.Unmarshal(userIndex, &currentIndex)
+		if err != nil {
+			fmt.Printf("execTransaction %v \n %s \n%v\n", err, string(userIndex), currentIndex)
+			events := []types.Event{
+				{
+					Type: "app",
+					Attributes: []kv.Pair{
+						{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
+						{Key: []byte("key"), Value: userIndex},
+					},
+				},
+			}
+
+			return types.ResponseDeliverTx{Code: CodeTypeUnknownError, Events: events}
+		} else {
+			if len(currentIndex.TransactionRecords) > 127 {
+				// create a new index
+				newKey := req.User + Str(6)
+				currentIndex.NextKey = newKey
+				var newIndexes UserTransIndex
+				newIndexes.TransactionRecords = append(newIndexes.TransactionRecords, string(req.Hash))
+				// save new index
+				//save
+				valueBytes, err := json.Marshal(newIndexes)
+				if err != nil {
+					fmt.Printf("execTransaction 2-2 %v \n", err)
+				}
+
+				err = app.state.db.Set([]byte(newKey), valueBytes)
+				if err != nil {
+					fmt.Printf("execTransaction 3-2 %v \n", err)
+				}
+
+			} else {
+
+			}
+
+			//save current indexes
+			valueBytes, err := json.Marshal(currentIndex)
+			if err != nil {
+				fmt.Printf("execTransaction 2-2 %v \n", err)
+			}
+
+			err = app.state.db.Set([]byte(req.User), valueBytes)
+			if err != nil {
+				fmt.Printf("execTransaction 3-2 %v \n", err)
+			}
+		}
+	}
+
+	// save transaction
+	app.state.db.Set([]byte(req.Hash), value)
 
 	events := []types.Event{
 		{
 			Type: "app",
 			Attributes: []kv.Pair{
-				{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-				{Key: []byte("key"), Value: []byte("test")},
+				{Key: []byte("creator"), Value: []byte("CoT Network")},
+				{Key: []byte("key"), Value: []byte(req.Hash)},
 			},
 		},
 	}
+	return types.ResponseDeliverTx{Code: CodeTypeOK, Events: events}
+}
 
-	return types.ResponseDeliverTx{Code: CodeTypeUnknownError, Events: events}
+func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.ResponseDeliverTx {
+	fmt.Println("hello,DeliverTx")
+	var requestData RequestData
+	decode, err := base64.StdEncoding.DecodeString(string(req.Tx))
+	req.Tx = decode
+	err = json.Unmarshal(req.Tx, &requestData)
+	if err != nil {
+		fmt.Printf("%s", err)
+		events := []types.Event{
+			{
+				Type: "app",
+				Attributes: []kv.Pair{
+					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
+					{Key: []byte("key"), Value: []byte("test")},
+				},
+			},
+		}
+
+		return types.ResponseDeliverTx{Code: CodeTypeUnknownError, Events: events}
+	}
+
+	if requestData.Type == TypeValidatorUpdating {
+		return app.execValidatorTx(requestData.Validator)
+	} else if requestData.Type == TypeTransaction {
+		hash := md5.New()
+		hash.Write(req.Tx)
+		requestData.Hash = hex.EncodeToString(hash.Sum(nil))
+		return app.execTransaction(requestData)
+	} else {
+		events := []types.Event{
+			{
+				Type: "app",
+				Attributes: []kv.Pair{
+					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
+					{Key: []byte("key"), Value: []byte("test")},
+				},
+			},
+		}
+		return types.ResponseDeliverTx{Code: CodeTypeUnknownError, Events: events}
+	}
 }
 
 func (app *KVStringApplication) CheckTx(req types.RequestCheckTx) types.ResponseCheckTx {
+	fmt.Println("hello,CheckTx")
 	return types.ResponseCheckTx{Code: CodeTypeOK, GasWanted: 1}
 }
 
 func (app *KVStringApplication) Commit() types.ResponseCommit {
+	fmt.Println("hello,Commit")
 	// Using a memdb - just return the big endian size of the db
 	appHash := make([]byte, 8)
 	binary.PutVarint(appHash, app.state.Size)
@@ -161,15 +291,21 @@ func (app *KVStringApplication) Commit() types.ResponseCommit {
 
 func (app *KVStringApplication) Query(reqQuery types.RequestQuery) (resQuery types.ResponseQuery) {
 	switch reqQuery.Path {
-	case "/val":
+	case "val":
 		key := []byte("val:" + string(reqQuery.Data))
 		value, _ := app.state.db.Get(key)
 		resQuery.Key = reqQuery.Data
 		resQuery.Value = value
 		return
+	case "user":
+		value, _ := app.state.db.Get(reqQuery.Data)
+		resQuery.Key = reqQuery.Data
+		resQuery.Value = value
+		return
 	default:
+
 		if reqQuery.Prove {
-			value, _ := app.state.db.Get(prefixKey(reqQuery.Data))
+			value, _ := app.state.db.Get(reqQuery.Data)
 			resQuery.Index = -1 // TODO make Proof return index
 			resQuery.Key = reqQuery.Data
 			resQuery.Value = value
@@ -183,7 +319,7 @@ func (app *KVStringApplication) Query(reqQuery types.RequestQuery) (resQuery typ
 		}
 
 		resQuery.Key = reqQuery.Data
-		value, _ := app.state.db.Get(prefixKey(reqQuery.Data))
+		value, _ := app.state.db.Get(reqQuery.Data)
 		resQuery.Value = value
 		if value != nil {
 			resQuery.Log = "exists"
@@ -199,13 +335,14 @@ func (app *KVStringApplication) InitChain(req types.RequestInitChain) types.Resp
 	for _, v := range req.Validators {
 		r := app.updateValidator(v)
 		if r.IsErr() {
-			app.logger.Error("Error updating validators", "r", r)
+			fmt.Printf("Error updating validators %v\n", r)
 		}
 	}
 	return types.ResponseInitChain{}
 }
 
 func (app *KVStringApplication) BeginBlock(req types.RequestBeginBlock) types.ResponseBeginBlock {
+	fmt.Println("hello,BeginBlock")
 	app.ValUpdates = make([]types.ValidatorUpdate, 0)
 	// deal with malicious behavior
 	for _, env := range req.ByzantineValidators {
@@ -223,6 +360,7 @@ func (app *KVStringApplication) BeginBlock(req types.RequestBeginBlock) types.Re
 }
 
 func (app *KVStringApplication) EndBlock(req types.RequestEndBlock) types.ResponseEndBlock {
+	fmt.Println("hello,EndBlock")
 	return types.ResponseEndBlock{
 		ValidatorUpdates: app.ValUpdates,
 	}
@@ -248,36 +386,18 @@ func MakeValSetChangeTx(pubkey types.PubKey, power int64) []byte {
 	return []byte(fmt.Sprintf("val:%s%d", pubStr, power))
 }
 
-func (app *KVStringApplication) execValidatorTx(tx []byte) types.ResponseDeliverTx {
-	tx = tx[len(ValidatorSetChangePrefix):]
-
-	pubKeyAndPower := strings.Split(string(tx), "!")
-	if len(pubKeyAndPower) != 2 {
-		return types.ResponseDeliverTx{
-			Code: CodeTypeEncodingError,
-			Log:  fmt.Sprintf("Expected 'pubkey!power'. Got %v", pubKeyAndPower),
-		}
-	}
-	pubkeyS, powerS := pubKeyAndPower[0], pubKeyAndPower[1]
+func (app *KVStringApplication) execValidatorTx(tx ValidatorUpdateDate) types.ResponseDeliverTx {
 
 	// decode the pubkey
-	pubkey, err := base64.StdEncoding.DecodeString(pubkeyS)
+	pubkey, err := base64.StdEncoding.DecodeString(tx.PubKey)
 	if err != nil {
 		return types.ResponseDeliverTx{
 			Code: CodeTypeEncodingError,
-			Log:  fmt.Sprintf("Pubkey (%s) is invalid base64", pubkeyS)}
-	}
-
-	// decode the power
-	power, err := strconv.ParseInt(powerS, 10, 64)
-	if err != nil {
-		return types.ResponseDeliverTx{
-			Code: CodeTypeEncodingError,
-			Log:  fmt.Sprintf("Power (%s) is not an int", powerS)}
+			Log:  fmt.Sprintf("Pubkey (%s) is invalid base64", tx.PubKey)}
 	}
 
 	// update
-	return app.updateValidator(types.Ed25519ValidatorUpdate(pubkey, power))
+	return app.updateValidator(types.Ed25519ValidatorUpdate(pubkey, tx.Power))
 }
 
 // add, update, or remove a validator
