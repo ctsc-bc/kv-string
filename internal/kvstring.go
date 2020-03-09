@@ -2,7 +2,7 @@ package kvstring
 
 import (
 	"bytes"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -38,13 +38,14 @@ type ValidatorUpdateDate struct {
 }
 
 type RequestData struct {
-	Type      string              `json:"type"`
-	User      string              `json:"user"`
-	Location  []string            `json:"location"`
-	Date      string              `json:"date"`
-	FileHash  string              `json:"fileHash"`
-	Validator ValidatorUpdateDate `json:"validator"`
-	Hash      string
+	Type            string              `json:"Type"`
+	User            string              `json:"User"`
+	Location        []float32           `json:"Location"`
+	Date            string              `json:"Date"`
+	FileHash        string              `json:"FileHash"`
+	FileHashPreview string              `json:"FilePreviewHash"`
+	Validator       ValidatorUpdateDate `json:"Validator"`
+	Hash            string              `json:"Hash"`
 }
 
 type UserTransIndex struct {
@@ -130,16 +131,16 @@ func isValidatorTx(tx []byte) bool {
 }
 
 func (app *KVStringApplication) execTransaction(req RequestData) types.ResponseDeliverTx {
-	fmt.Println("hello,execTransaction")
+	fmt.Println(req.Hash)
 	value, _ := json.Marshal(req)
 	if req.User == "" || len(req.Location) != 2 || req.FileHash == "" || req.Date == "" {
-		fmt.Printf("execTransaction: bad request %s \n", string(value))
+		fmt.Printf("Transaction: bad request %s \n", string(value))
 		events := []types.Event{
 			{
 				Type: "app",
 				Attributes: []kv.Pair{
 					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-					{Key: []byte("key"), Value: value},
+					{Key: []byte("key"), Value: []byte(req.Hash)},
 				},
 			},
 		}
@@ -153,28 +154,28 @@ func (app *KVStringApplication) execTransaction(req RequestData) types.ResponseD
 
 	if err != nil || userIndex == nil {
 		// update current index
-		currentIndex.TransactionRecords = append(currentIndex.TransactionRecords, string(req.Hash))
+		currentIndex.TransactionRecords = append(currentIndex.TransactionRecords, req.Hash)
 
 		valueBytes, err := json.Marshal(currentIndex)
 		if err != nil {
-			fmt.Printf("execTransaction 2 %v \n", err)
+			fmt.Printf("Transaction 2 %v \n", err)
 		}
 
 		err = app.state.db.Set([]byte(req.User), valueBytes)
 		if err != nil {
-			fmt.Printf("execTransaction 3 %v \n", err)
+			fmt.Printf("Transaction 3 %v \n", err)
 		}
 
 	} else {
 		err := json.Unmarshal(userIndex, &currentIndex)
 		if err != nil {
-			fmt.Printf("execTransaction %v \n %s \n%v\n", err, string(userIndex), currentIndex)
+			fmt.Printf("Transaction %v \n %s \n%v\n", err, string(userIndex), currentIndex)
 			events := []types.Event{
 				{
 					Type: "app",
 					Attributes: []kv.Pair{
 						{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-						{Key: []byte("key"), Value: userIndex},
+						{Key: []byte("key"), Value: []byte(req.Hash)},
 					},
 				},
 			}
@@ -191,27 +192,29 @@ func (app *KVStringApplication) execTransaction(req RequestData) types.ResponseD
 				//save
 				valueBytes, err := json.Marshal(newIndexes)
 				if err != nil {
-					fmt.Printf("execTransaction 2-2 %v \n", err)
+					fmt.Printf("Transaction 2-2 %v \n", err)
 				}
 
 				err = app.state.db.Set([]byte(newKey), valueBytes)
 				if err != nil {
-					fmt.Printf("execTransaction 3-2 %v \n", err)
+					fmt.Printf("Transaction 3-2 %v \n", err)
 				}
 
 			} else {
-
+				currentIndex.TransactionRecords = append(currentIndex.TransactionRecords, req.Hash)
+				fmt.Println(req.Hash)
 			}
 
 			//save current indexes
+			fmt.Println(currentIndex)
 			valueBytes, err := json.Marshal(currentIndex)
 			if err != nil {
-				fmt.Printf("execTransaction 2-2 %v \n", err)
+				fmt.Printf("Transaction 2-2 %v \n", err)
 			}
 
 			err = app.state.db.Set([]byte(req.User), valueBytes)
 			if err != nil {
-				fmt.Printf("execTransaction 3-2 %v \n", err)
+				fmt.Printf("Transaction 3-2 %v \n", err)
 			}
 		}
 	}
@@ -233,10 +236,14 @@ func (app *KVStringApplication) execTransaction(req RequestData) types.ResponseD
 
 func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.ResponseDeliverTx {
 	fmt.Println("hello,DeliverTx")
+
 	var requestData RequestData
+	fmt.Println(requestData.Hash)
 	decode, err := base64.StdEncoding.DecodeString(string(req.Tx))
-	req.Tx = decode
-	err = json.Unmarshal(req.Tx, &requestData)
+	err = json.Unmarshal(decode, &requestData)
+	var hash = sha256.Sum256(req.Tx)
+	requestData.Hash = hex.EncodeToString(hash[:])
+	fmt.Println(requestData.Hash)
 	if err != nil {
 		fmt.Printf("%s", err)
 		events := []types.Event{
@@ -244,7 +251,7 @@ func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.Resp
 				Type: "app",
 				Attributes: []kv.Pair{
 					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-					{Key: []byte("key"), Value: []byte("test")},
+					{Key: []byte("key"), Value: []byte(requestData.Hash)},
 				},
 			},
 		}
@@ -255,9 +262,7 @@ func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.Resp
 	if requestData.Type == TypeValidatorUpdating {
 		return app.execValidatorTx(requestData.Validator)
 	} else if requestData.Type == TypeTransaction {
-		hash := md5.New()
-		hash.Write(req.Tx)
-		requestData.Hash = hex.EncodeToString(hash.Sum(nil))
+
 		return app.execTransaction(requestData)
 	} else {
 		events := []types.Event{
@@ -265,7 +270,7 @@ func (app *KVStringApplication) DeliverTx(req types.RequestDeliverTx) types.Resp
 				Type: "app",
 				Attributes: []kv.Pair{
 					{Key: []byte("creator"), Value: []byte("Cosmoshi Netowoko")},
-					{Key: []byte("key"), Value: []byte("test")},
+					{Key: []byte("key"), Value: []byte(requestData.Hash)},
 				},
 			},
 		}
@@ -290,6 +295,7 @@ func (app *KVStringApplication) Commit() types.ResponseCommit {
 }
 
 func (app *KVStringApplication) Query(reqQuery types.RequestQuery) (resQuery types.ResponseQuery) {
+
 	switch reqQuery.Path {
 	case "val":
 		key := []byte("val:" + string(reqQuery.Data))
